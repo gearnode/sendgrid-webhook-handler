@@ -1,15 +1,19 @@
 package main
 
 import (
-	"encoding/json"
 	"encoding/base64"
-	"net/http"
+	"encoding/json"
+	"errors"
 	"log"
-	"time"
+	"net/http"
+	"os"
 	"strings"
+	"time"
+
+	"github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
-const(
+const (
 	USERNAME = "test"
 	PASSWORD = "test"
 )
@@ -17,12 +21,11 @@ const(
 func l(msg string) string {
 	x := map[string]string{
 		"message": msg,
-		"ts": time.Now().UTC().String(),
+		"ts":      time.Now().UTC().String(),
 	}
 	payload, _ := json.Marshal(x)
 	return string(payload)
 }
-
 
 func handleEvent(w http.ResponseWriter, r *http.Request) {
 
@@ -48,8 +51,8 @@ func handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload, _ := base64.StdEncoding.DecodeString(auth[1])
-	pair := strings.SplitN(string(payload), ":", 2)
+	parse, _ := base64.StdEncoding.DecodeString(auth[1])
+	pair := strings.SplitN(string(parse), ":", 2)
 
 	if len(pair) != 2 || pair[0] != USERNAME || pair[1] != PASSWORD {
 		log.Println(l("401 " + r.Method + " " + r.URL.String()))
@@ -68,6 +71,39 @@ func handleEvent(w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
+
+	bootstrapServers := os.Getenv("BOOTSTRAP_SERVERS")
+	if bootstrapServers == "" {
+		panic(errors.New("BOOTSTRAP_SERVERS environment variable is nil."))
+	}
+	producer, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": bootstrapServers})
+	if err != nil {
+		panic(err)
+	}
+
+	defer producer.Close()
+
+	// Monitor message delivery
+	go func() {
+		for e := range producer.Events() {
+			switch ev := e.(type) {
+			case *kafka.Message:
+				if ev.TopicPartition.Error != nil {
+					log.Println(l("Delivery success"))
+				} else {
+					log.Println(l("Delivery failed"))
+				}
+			}
+		}
+	}()
+
+	// loop to produce split array in sigle event
+	topic := "sendgrid"
+	y, _ := json.Marshal(payload)
+	producer.Produce(&kafka.Message{
+		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+		Value:          y,
+	}, nil)
 
 	log.Println(l("200 " + r.Method + " " + r.URL.String()))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
